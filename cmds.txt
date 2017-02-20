@@ -11,12 +11,20 @@ cd arpg_apps/
 cd applications/
 cd SensorViewer/
 ./SensorViewer -cam ximea://
+
+./SensorViewer -cam 'join://ximea:[exp=15000]//&openni2:[rgb=1,depth=1]//'
+
+with battery ->   ./SensorViewer -cam 'join://ximea:[exp=15000,sync=2]//&openni2:[rgb=1,depth=1]//'
+
+
+
 mv sensors_log0.log ../../../vicalib/
 cd ../../../vicalib/
 
 ./vicalib -grid_preset medium -cam log://./sensors_log0.log -alsologtostderr
 
 ./vicalib -grid_preset medium -cam log://./sensors_log0.log -alsologtostderr
+./vicalib -grid_preset medium -cam log://./sensors_log0.log -alsologtostderr -models=fov,fov
 
 
 ./logtool -extract_images -in sensors_log0.log -out oimg/

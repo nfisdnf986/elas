@@ -13,12 +13,12 @@ add_custom_target(uninstall
     COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/cmake_uninstall.cmake")
 
 
-
 find_package(OpenCV REQUIRED)
 find_package(GFlags REQUIRED)
 find_package(GLog REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(HAL REQUIRED)
+find_package(Calibu REQUIRED)
 
 # directories
 set (LIBELAS_SRC_DIR src)
@@ -34,6 +34,9 @@ FILE(GLOB LIBELAS_SRC_FILES "src/*.cpp")
 
 # make release version
 set(CMAKE_BUILD_TYPE Release)
+#~ set(CMAKE_BUILD_TYPE Debug)
+
+MESSAGE( STATUS "ghost CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE}" )
 
 # build demo program
 add_executable(elas ${LIBELAS_SRC_FILES})
@@ -44,6 +47,7 @@ include_directories("${LIBELAS_SRC_DIR}"
   ${OpenCV_INCLUDE_DIRS}
   ${CMAKE_CURRENT_BINARY_DIR}/HAL
   ${HAL_INCLUDE_DIRS}
+  ${Calibu_INCLUDE_DIRS}
 )
 
 target_link_libraries( elas
@@ -52,4 +56,5 @@ target_link_libraries( elas
   ${GFLAGS_LIBRARIES}
   ${GLog_LIBRARIES}
   ${PROTOBUF_LIBRARY}
+  ${Calibu_LIBRARY}
 )

@@ -92,28 +92,27 @@ public:
       if (s==ROBOTICS) {
         disp_min              = 0;
         disp_max              = 255;
-        support_threshold     = 0.85;
-        support_texture       = 10;
+        support_threshold     = 0.95;
+        support_texture       = 5;
         candidate_stepsize    = 5;
-        incon_window_size     = 5;
+        incon_window_size     = 7;
         incon_threshold       = 5;
-        incon_min_support     = 5;
-        add_corners           = 0;
-        grid_size             = 20;
-        beta                  = 0.02;
-        gamma                 = 3;
+        incon_min_support     = 7;
+        add_corners           = 1;
+        grid_size             = 30;
+        beta                  = 0.01;
+        gamma                 = 1;
         sigma                 = 1;
         sradius               = 2;
         match_texture         = 1;
-        lr_threshold          = 2;
-        speckle_sim_threshold = 1;
+        lr_threshold          = 3;
+        speckle_sim_threshold = 3;
         speckle_size          = 200;
-        ipol_gap_width        = 3;
-        filter_median         = 0;
+        ipol_gap_width        = 25;
+        filter_median         = 1;
         filter_adaptive_mean  = 1;
         postprocess_only_left = 1;
         subsampling           = 0;
-        
       // default settings for middlebury benchmark
       // (interpolate all missing disparities)
       } else {
@@ -140,6 +139,7 @@ public:
         filter_adaptive_mean  = 0;
         postprocess_only_left = 0;
         subsampling           = 0;
+	std::cout << "PARAM ELSE\n";
       }
     }
   };

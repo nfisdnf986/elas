@@ -105,7 +105,7 @@ public:
         sigma                 = 1;
         sradius               = 2;
         match_texture         = 1;
-        lr_threshold          = 3;
+        lr_threshold          = 40;
         speckle_sim_threshold = 3;
         speckle_size          = 200;
         ipol_gap_width        = 25;

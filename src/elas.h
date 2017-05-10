@@ -100,15 +100,15 @@ public:
         incon_min_support     = 7;
         add_corners           = 1;
         grid_size             = 30;
-        beta                  = 0.01;
-        gamma                 = 1;
+        beta                  = 0.05;
+        gamma                 = 3;
         sigma                 = 1;
         sradius               = 2;
         match_texture         = 1;
         lr_threshold          = 40;
         speckle_sim_threshold = 3;
         speckle_size          = 200;
-        ipol_gap_width        = 25;
+        ipol_gap_width        = 1000;
         filter_median         = 1;
         filter_adaptive_mean  = 1;
         postprocess_only_left = 1;
@@ -139,7 +139,6 @@ public:
         filter_adaptive_mean  = 0;
         postprocess_only_left = 0;
         subsampling           = 0;
-	std::cout << "PARAM ELSE\n";
       }
     }
   };

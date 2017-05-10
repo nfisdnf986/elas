@@ -17,6 +17,7 @@
 #include <HAL/Messages/Image.h>
 #include <HAL/Messages/Logger.h>
 #include <HAL/Messages/Reader.h>
+#include <HAL/Camera/CameraDevice.h>
 
 #include <calibu/Calibu.h>
 #include <calibu/cam/stereo_rectify.h>
@@ -44,6 +45,7 @@ using namespace std;
 
 DEFINE_string(in, "", "Input log file or input directory.");
 DEFINE_string(out, "", "Output log file or output directory.");
+DEFINE_string(cam, "", "Camera XML file.");
 
 DEFINE_bool(extract_log, false, "Enable log subset extraction.");
 DEFINE_bool(extract_images, false, "Enable image extraction to individual files.");
@@ -59,8 +61,8 @@ DEFINE_string(extract_frame_range, "",
 DEFINE_string(cat_logs, "",
               "Comma-separated list of logs to concatenate together. ");
 
-
-std::vector<calibu::LookupTable> lut;
+static std::vector<calibu::LookupTable> undistort_lut;
+static std::vector<calibu::LookupTable> rectify_lut;
 
 
 typedef std::function<bool(char)> TrimPred;
@@ -185,64 +187,131 @@ void process (const char* file_1,const char* file_2) {
   free(D2_data);
 }
 
+void create_undistort_lookuptable(void)
+{
+    std::shared_ptr<calibu::Rig<double>> rig = calibu::ReadXmlRig(FLAGS_cam);
+    const size_t num_cams = rig->NumCams();
+    undistort_lut.resize(num_cams);
 
-void get_lut(void) {
-  // rectify
-  Sophus::SE3d t_nr_nl;
+    for(size_t ii=0; ii< num_cams; ++ii) {
+        const std::shared_ptr<calibu::CameraInterface<double>> cmod = rig->cameras_[ii];
 
-  std::shared_ptr<calibu::Rig<double>> cam_xml = calibu::ReadXmlRig("cameras.xml");
-  Eigen::VectorXd cam0_xml_params = cam_xml->cameras_[0]->GetParams();
-  Eigen::VectorXd cam1_xml_params = cam_xml->cameras_[1]->GetParams();
+        // Allocate memory for LUTs.
+        undistort_lut[ii] = calibu::LookupTable(cmod->Width(), cmod->Height());
 
-  std::shared_ptr<calibu::Rig<double>> new_rig = calibu::ToCoordinateConvention(cam_xml, calibu::RdfVision);
+        // Setup new camera model
+        Eigen::Vector2i size_;
+        Eigen::VectorXd params_(static_cast<int>(calibu::LinearCamera<double>::NumParams));
+        size_ << cmod->Width(), cmod->Height();
+        params_ << cmod->K()(0,0), cmod->K()(1,1), cmod->K()(0,2), cmod->K()(1,2);
+        std::shared_ptr<calibu::CameraInterface<double>> new_cam(new calibu::LinearCamera<double>(params_, size_));
 
-   // lookup tables
-  lut.resize(new_rig->NumCams());
-  for(size_t i=0; i< new_rig->NumCams(); ++i) {
-    lut[i] = calibu::LookupTable(new_rig->cameras_[i]->Width(), new_rig->cameras_[i]->Height());
-  }
-
-  if(new_rig->NumCams() == 2) {
-	  cam_xml = calibu::CreateScanlineRectifiedLookupAndCameras(
-								new_rig->cameras_[1]->Pose().inverse()*new_rig->cameras_[0]->Pose(),
-								new_rig->cameras_[0], new_rig->cameras_[1],
-								t_nr_nl,
-								lut[0], lut[1]
-								);
-  }
+        calibu::CreateLookupTable(rig->cameras_[ii], new_cam->K().inverse(), undistort_lut[ii]);
+    }
 }
 
+void undistort_img(const hal::ImageMsg& image, calibu::LookupTable lut,
+                 hal::ImageMsg &out_image)
+{
+    hal::Image inimg = hal::Image(image);
+
+    hal::ImageMsg* pimg = new hal::ImageMsg();
+    pimg->set_width(inimg.Width());
+    pimg->set_height(inimg.Height());
+    pimg->set_type( (hal::Type)inimg.Type());
+    pimg->set_format( (hal::Format)inimg.Format());
+    //Transfer the timestamps from the source to the destination
+    pimg->set_timestamp(inimg.Timestamp());
+
+    uint num_channels = 1;
+    if (pimg->format() == hal::PB_LUMINANCE) {
+        num_channels = 1;
+    } else if (pimg->format() == hal::PB_BGRA ||
+               pimg->format() == hal::PB_RGBA) {
+        num_channels = 4;
+    } else {
+        num_channels = 3;
+    }
+
+    hal::Image img = hal::Image(*pimg);
+
+    if (pimg->type() == hal::PB_UNSIGNED_BYTE)
+    {
+        pimg->mutable_data()->resize(inimg.Width() * inimg.Height() *
+                                   sizeof(unsigned char) * num_channels);
+        calibu::Rectify<unsigned char>(
+            lut, inimg.data(),
+            reinterpret_cast<unsigned char*>(&pimg->mutable_data()->front()),
+            img.Width(), img.Height(), num_channels);
+    }
+    else if (pimg->type() == hal::PB_FLOAT)
+    {
+        pimg->mutable_data()->resize(inimg.Width() * inimg.Height() *
+                                   sizeof(float) * num_channels);
+        calibu::Rectify<float>(
+            lut, (float*)inimg.data(),
+            reinterpret_cast<float*>(&pimg->mutable_data()->front()),
+            img.Width(), img.Height(), num_channels);
+    }
+
+    out_image = *pimg;
+}
+
+void create_rectify_lookuptable(void)
+{
+    Sophus::SE3d T_nr_nl;
+    std::shared_ptr<calibu::Rig<double>> rig = calibu::ReadXmlRig(FLAGS_cam);
+    CHECK_GE(2, rig->NumCams()) << "Unable to find 2 cameras in file '" + FLAGS_cam + "'";
+    size_t num_cams = 2;
+
+    // Convert rig to vision frame.
+    std::shared_ptr<calibu::Rig<double>> new_rig =
+        calibu::ToCoordinateConvention(rig, calibu::RdfVision);
+
+    // Generate lookup tables for stereo rectify.
+    rectify_lut.resize(num_cams);
+    for(size_t i=0; i < num_cams; ++i) {
+        rectify_lut[i] = calibu::LookupTable(new_rig->cameras_[i]->Width(), new_rig->cameras_[i]->Height());
+    }
+
+    std::shared_ptr<calibu::Rig<double>> rectified_rig = calibu::CreateScanlineRectifiedLookupAndCameras(
+        new_rig->cameras_[1]->Pose().inverse()*new_rig->cameras_[0]->Pose(),
+        new_rig->cameras_[0], new_rig->cameras_[1],
+        T_nr_nl,
+        rectify_lut[0], rectify_lut[1]
+        );
+}
 
 void rectify_img(const hal::ImageMsg& image, calibu::LookupTable lt,
-                 hal::ImageMsg &out_image) {
+                 hal::ImageMsg &out_image)
+{
+    hal::Image raw_img = hal::Image(image);
 
-  hal::Image raw_img = hal::Image(image);
+    uint num_channels = 1;
+    if (raw_img.Format() == hal::Format::PB_BGR ||
+        raw_img.Format() == hal::Format::PB_RGB) {
+        num_channels = 3;
+    } else if (raw_img.Format() == hal::Format::PB_BGRA ||
+               raw_img.Format() == hal::Format::PB_RGBA) {
+        num_channels = 4;
+    }
 
-  uint num_channels = 1;
-  if (raw_img.Format() == hal::Format::PB_BGR ||
-      raw_img.Format() == hal::Format::PB_RGB) {
-    num_channels = 3;
-  } else if (raw_img.Format() == hal::Format::PB_BGRA ||
-             raw_img.Format() == hal::Format::PB_RGBA) {
-    num_channels = 4;
-  }
-
-  hal::ImageMsg* pimg = new hal::ImageMsg();
-  pimg->set_width(raw_img.Width());
-  pimg->set_height(raw_img.Height());
-  pimg->set_timestamp(raw_img.Timestamp());
-  pimg->set_type( (hal::Type)raw_img.Type());
-  pimg->set_format( (hal::Format)raw_img.Format());
-  pimg->mutable_data()->resize(raw_img.Width() * raw_img.Height() *
+    hal::ImageMsg* pimg = new hal::ImageMsg();
+    pimg->set_width(raw_img.Width());
+    pimg->set_height(raw_img.Height());
+    pimg->set_timestamp(raw_img.Timestamp());
+    pimg->set_type( (hal::Type)raw_img.Type());
+    pimg->set_format( (hal::Format)raw_img.Format());
+    pimg->mutable_data()->resize(raw_img.Width() * raw_img.Height() *
                                    num_channels);
 
-  hal::Image img = hal::Image(*pimg);
-  calibu::Rectify(
+    hal::Image img = hal::Image(*pimg);
+    calibu::Rectify(
             lt, raw_img.data(),
             reinterpret_cast<unsigned char*>(&pimg->mutable_data()->front()),
             img.Width(), img.Height(), num_channels);
 
-  out_image = *pimg;
+    out_image = *pimg;
 }
 
 
@@ -251,141 +320,134 @@ inline void SaveImage(const std::string& out_dir,
                       int channel_index,
                       unsigned int frame_number,
                       double timestamp,
-                      const hal::ImageMsg& image) {
-  // Convert index to string.
-  std::string index;
-  std::ostringstream convert;
-  convert << channel_index;
-  index = convert.str();
+                      const hal::ImageMsg& image)
+{
+    // Convert index to string.
+    std::string index;
+    std::ostringstream convert;
+    convert << channel_index;
+    index = convert.str();
 
-  std::string file_prefix = out_dir + "/";
-  file_prefix = file_prefix + "channel" + index;
+    std::string file_prefix = out_dir + "/";
+    file_prefix = file_prefix + "channel" + index;
 
-  convert.str("");
-  convert.clear();
-  if (timestamp == 0.)
-    convert << std::fixed << std::setfill('0') << std::setw(5) << frame_number;
-  else
-    convert << std::fixed << std::setfill('0') << std::setw(5) << frame_number
+    convert.str("");
+    convert.clear();
+    if (timestamp == 0.)
+        convert << std::fixed << std::setfill('0') << std::setw(5) << frame_number;
+    else
+        convert << std::fixed << std::setfill('0') << std::setw(5) << frame_number
             << "_" << std::setprecision(9) << timestamp;
-  index = convert.str();
+    index = convert.str();
 
-  std::string filename;
+    std::string filename;
 
-  hal::ImageMsg out_img;
-  if (file_prefix.back() == '1')
-    rectify_img(image, lut[1], out_img);
-  else
-    rectify_img(image, lut[0], out_img);
+    hal::ImageMsg undistorted_img;
+    hal::ImageMsg out_img;
 
-  // Use OpenCV to handle saving the file for us.
-  //~ cv::Mat cv_image = hal::WriteCvMat(image);
-  cv::Mat cv_image = hal::WriteCvMat(out_img);
+    undistort_img(image, undistort_lut[channel_index], undistorted_img);
+    rectify_img(undistorted_img, rectify_lut[channel_index], out_img);
 
-  if (out_img.type() == hal::Type::PB_FLOAT) {
-    // Save floats to our own "portable depth map" format.
-    filename = file_prefix + "_" + index + ".pdm";
+    // Use OpenCV to handle saving the file for us.
+    //~ cv::Mat cv_image = hal::WriteCvMat(image);
+    cv::Mat cv_image = hal::WriteCvMat(out_img);
 
-    std::ofstream file(filename.c_str(), std::ios::out | std::ios::binary);
-    file << "P7" << std::endl;
-    file << cv_image.cols << " " << cv_image.rows << std::endl;
-    const size_t size = cv_image.elemSize1() * cv_image.rows * cv_image.cols;
-    file << 4294967295 << std::endl;
-    file.write((const char*)cv_image.data, size);
-    file.close();
-  } else if (out_img.type() == hal::Type::PB_BYTE
+    if (out_img.type() == hal::Type::PB_FLOAT) {
+        // Save floats to our own "portable depth map" format.
+        filename = file_prefix + "_" + index + ".pdm";
+
+        std::ofstream file(filename.c_str(), std::ios::out | std::ios::binary);
+        file << "P7" << std::endl;
+        file << cv_image.cols << " " << cv_image.rows << std::endl;
+        const size_t size = cv_image.elemSize1() * cv_image.rows * cv_image.cols;
+        file << 4294967295 << std::endl;
+        file.write((const char*)cv_image.data, size);
+        file.close();
+    } else if (out_img.type() == hal::Type::PB_BYTE
              || out_img.type() == hal::Type::PB_UNSIGNED_BYTE
              || out_img.type() == hal::Type::PB_SHORT
              || out_img.type() == hal::Type::PB_UNSIGNED_SHORT) {
-    // OpenCV only supports byte/short data types with 1/3 channel images.
-    filename = file_prefix + "_" + index + ".pgm";
+        // OpenCV only supports byte/short data types with 1/3 channel images.
+        filename = file_prefix + "_" + index + ".pgm";
+        std::string filename1 = file_prefix + "_" + index + "_orig.pgm";
+        std::string filename2 = file_prefix + "_" + index + "_undist.pgm";
+        std::string filename3 = file_prefix + "_" + index + "_rect.pgm";
     
-    cv::imwrite(filename, cv_image);
+        cv::imwrite(filename, cv_image);
+        cv::imwrite(filename1, hal::WriteCvMat(image));
+        cv::imwrite(filename2, hal::WriteCvMat(undistorted_img));
+        cv::imwrite(filename3, hal::WriteCvMat(out_img));
 
-    if (file_prefix.back() == '1')
-    {
-        int whwqehqw = file_prefix.size();
-        std::string cam0 = filename;
-        cam0[whwqehqw-1] = '0';
+        if (file_prefix.back() == '1')
+        {
+            int whwqehqw = file_prefix.size();
+            std::string cam0 = filename;
+            cam0[whwqehqw-1] = '0';
 
-        process(cam0.c_str(), filename.c_str());
+            process(cam0.c_str(), filename.c_str());
+        }
+    } else {
+        LOG(FATAL) << "Input image type not supported for extraction.";
     }
-  } else {
-    LOG(FATAL) << "Input image type not supported for extraction.";
-  }
 }
 
 
 /** Extracts single images out of a log file. */
-void ExtractImages() {
-  static const int kNoRange = -1;
+void compute_disparities()
+{
+    static const int kNoRange = -1;
 
-  int frame_min = kNoRange, frame_max = kNoRange;
-  std::vector<int> frames;
-  Split(TrimQuotes(FLAGS_extract_frame_range), ',', &frames);
-  if (!frames.empty()) {
-    CHECK_EQ(2, frames.size()) << "extract_frame_range must be frame PAIR";
-    frame_min = frames[0];
-    frame_max = frames[1];
-    CHECK_LE(frame_min, frame_max)
-        << "Minimum frame index must be <= than max frame index.";
-  }
-
-  hal::Reader reader(FLAGS_in);
-  reader.Enable(hal::Msg_Type_Camera);
-
-  int idx = 0;
-  std::unique_ptr<hal::Msg> msg;
-  while (frame_min != kNoRange && idx < frame_min) {
-    if ((msg = reader.ReadMessage()) && msg->has_camera()) {
-      ++idx;
+    int frame_min = kNoRange, frame_max = kNoRange;
+    std::vector<int> frames;
+    Split(TrimQuotes(FLAGS_extract_frame_range), ',', &frames);
+    if (!frames.empty()) {
+        CHECK_EQ(2, frames.size()) << "extract_frame_range must be frame PAIR";
+        frame_min = frames[0];
+        frame_max = frames[1];
+        CHECK_LE(frame_min, frame_max)
+            << "Minimum frame index must be <= than max frame index.";
     }
-  }
 
-  while ((frame_max == kNoRange ||
-          idx <= frame_max) &&
-         (msg = reader.ReadMessage())) {
-    if (msg->has_camera()) {
-      const hal::CameraMsg& cam_msg = msg->camera();
-      for (int ii = 0; ii < cam_msg.image_size(); ++ii) {
-        const hal::ImageMsg& img_msg = cam_msg.image(ii);
+    hal::Reader reader(FLAGS_in);
+    reader.Enable(hal::Msg_Type_Camera);
 
-        SaveImage(FLAGS_out, ii, idx, cam_msg.system_time(), img_msg);
-      }
-      ++idx;
+    int idx = 0;
+    std::unique_ptr<hal::Msg> msg;
+    while (frame_min != kNoRange && idx < frame_min) {
+        if ((msg = reader.ReadMessage()) && msg->has_camera()) {
+            ++idx;
+       }
     }
-  }
+
+    while ((frame_max == kNoRange ||
+            idx <= frame_max) &&
+            (msg = reader.ReadMessage())) {
+        if (msg->has_camera()) {
+            const hal::CameraMsg& cam_msg = msg->camera();
+            for (int ii = 0; ii < 2; ++ii) {
+                const hal::ImageMsg& img_msg = cam_msg.image(ii);
+
+                SaveImage(FLAGS_out, ii, idx, cam_msg.system_time(), img_msg);
+            }
+            ++idx;
+        }
+    }
 }
 
 int main(int argc, char *argv[])
 {
-  google::ParseCommandLineFlags(&argc, &argv, true);
-  google::InitGoogleLogging(argv[0]);
+    google::ParseCommandLineFlags(&argc, &argv, true);
+    google::InitGoogleLogging(argv[0]);
 
-  get_lut();
-
-  if (FLAGS_extract_images != 1) {
-    LOG(FATAL) << "Must choose extract_images logtool task.";
-  }
-
-  if (FLAGS_extract_images) {
     CHECK(!FLAGS_in.empty()) << "Input file required for extraction.";
     CHECK(!FLAGS_out.empty()) << "Output directory required for extraction.";
-    ExtractImages();
-  }
+    CHECK(!FLAGS_cam.empty()) << "Camera XML file required.";
 
 
+    create_undistort_lookuptable();
+    create_rectify_lookuptable();
 
+    compute_disparities();
 
-    //std::shared_ptr<Rig<double>> 
-    std::shared_ptr<calibu::Rig<double>> rig = calibu::ReadXmlRig("cameras.xml");
-    for(size_t ii=0; ii< rig->cameras_.size(); ++ii) {
-        std::shared_ptr<calibu::CameraInterface<double>> cam = rig->cameras_[ii];
-        cam->PrintInfo();
-        std::cout << "    Params       = \n" << cam->K().transpose() << std::endl;
-        std::cout << "    T_wc         = \n" << cam->Pose().matrix3x4() << std::endl;
-    }
-
-
-  return 0;
+    return 0;
 }

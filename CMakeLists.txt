@@ -33,8 +33,8 @@ SET(CMAKE_CXX_FLAGS "-std=c++11 -msse3")
 FILE(GLOB LIBELAS_SRC_FILES "src/*.cpp")
 
 # make release version
-set(CMAKE_BUILD_TYPE Release)
-#~ set(CMAKE_BUILD_TYPE Debug)
+# set(CMAKE_BUILD_TYPE Release)
+# set(CMAKE_BUILD_TYPE Debug)
 
 MESSAGE( STATUS "ghost CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE}" )
 
